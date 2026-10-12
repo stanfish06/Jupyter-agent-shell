@@ -12,6 +12,7 @@ from acp import PROTOCOL_VERSION, Client, RequestError, connect_to_agent
 from acp.schema import (
     AllowedOutcome,
     ClientCapabilities,
+    ConfigOptionUpdate,
     CreateTerminalResponse,
     DeclineElicitationResponse,
     DeniedOutcome,
@@ -52,6 +53,7 @@ class Agent(Client):
         self.ask_permission = ask_permission
         self.session_id: str | None = None
         self.mode: str | None = None
+        self.config_options: list[Any] = []
         self.busy = False
         self.last_seen_cell_idx: dict[str, int] = {}
         self._proc: aio_subprocess.Process | None = None
@@ -93,6 +95,7 @@ class Agent(Client):
             ],
         )
         self.session_id = session.session_id
+        self.config_options = list(session.config_options or [])
         self.mode = session.modes.current_mode_id if session.modes else None
         if session.modes and self.mode != "default":
             ids = [m.id for m in session.modes.available_modes]
@@ -134,6 +137,27 @@ class Agent(Client):
         finally:
             self.busy = False
 
+    def option(self, config_id: str) -> Any | None:
+        return next((o for o in self.config_options if o.id == config_id), None)
+
+    def option_label(self, config_id: str) -> str:
+        opt = self.option(config_id)
+        if opt is None:
+            return "?"
+        for choice in getattr(opt, "options", []) or []:
+            if choice.value == opt.current_value:
+                return choice.name
+        return str(opt.current_value)
+
+    async def set_option(self, config_id: str, value: str) -> None:
+        if self._conn is None or self.session_id is None:
+            raise RuntimeError("agent not started")
+        resp = await self._conn.set_config_option(
+            config_id=config_id, session_id=self.session_id, value=value
+        )
+        if resp.config_options is not None:
+            self.config_options = list(resp.config_options)
+
     async def cancel(self) -> None:
         if self._conn and self.session_id and self.busy:
             await self._conn.cancel(session_id=self.session_id)
@@ -165,6 +189,8 @@ class Agent(Client):
         return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", optionId=chosen))
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
+        if isinstance(update, ConfigOptionUpdate) and update.config_options is not None:
+            self.config_options = list(update.config_options)
         self.on_update(update)
 
     async def read_text_file(

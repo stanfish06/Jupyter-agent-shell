@@ -132,7 +132,12 @@ KeysScreen #dialog {
     height: 1fr;
 }
 
-PermissionScreen, PathScreen, KeysScreen {
+#choices {
+    height: auto;
+    max-height: 20;
+}
+
+PermissionScreen, PathScreen, KeysScreen, ChoiceScreen {
     align: center middle;
 }
 

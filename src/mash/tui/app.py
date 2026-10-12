@@ -12,6 +12,7 @@ from acp.schema import (
     AgentMessageChunk,
     AgentPlanUpdate,
     AgentThoughtChunk,
+    ConfigOptionUpdate,
     PermissionOption,
     TextContentBlock,
     ToolCallProgress,
@@ -33,10 +34,12 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    OptionList,
     Static,
     Tab,
     Tabs,
 )
+from textual.widgets.option_list import Option
 
 from mash.agent import Agent
 from mash.session import MatlabSession, SessionEvent
@@ -97,6 +100,7 @@ KEYS = [
     ("1-9", "nth session tab", "prefix"),
     ("escape", "cancel", "prefix"),
     ("enter", "send to agent", "agent"),
+    ("/model, /effort, /mode", "pick model, effort level, or permission mode", "agent"),
     ("shift+enter / ctrl+j", "newline in the agent prompt", "agent"),
     ("/", "focus the filter", "keys"),
     ("escape", "close", "keys"),
@@ -169,6 +173,34 @@ class PrefixScreen(ModalScreen[None]):
         self.dismiss()
 
 
+class ChoiceScreen(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "dismiss(None)", "cancel")]
+
+    def __init__(self, title: str, choices: list[tuple[str, str, str]], current: str) -> None:
+        super().__init__()
+        self.title_text = title
+        self.choices = choices
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self.title_text)
+            yield OptionList(id="choices")
+
+    def on_mount(self) -> None:
+        ol = self.query_one(OptionList)
+        for value, name, desc in self.choices:
+            mark = "● " if value == self.current else "  "
+            ol.add_option(Option(f"{mark}{name}  [dim]{desc}[/]", id=value))
+        idx = next((i for i, c in enumerate(self.choices) if c[0] == self.current), 0)
+        ol.highlighted = idx
+        ol.focus()
+
+    @on(OptionList.OptionSelected)
+    def chosen(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(str(event.option.id))
+
+
 class WorkspaceList(ListView):
     BINDINGS = [Binding("escape", "leave", "back")]
 
@@ -209,8 +241,29 @@ class AgentPane(Vertical):
 
     def status(self, text: str) -> None:
         self.state_text = text
-        self.query_one("#agent-status", Static).update(f"agent: {text}")
+        setup = ""
+        if self.agent.config_options:
+            setup = f"  {self.agent.option_label('model')} · effort {self.agent.option_label('effort')}"
+        self.query_one("#agent-status", Static).update(f"agent: {text}{setup}")
         self.mash.refresh_workspace_labels()
+
+    async def choose_option(self, config_id: str) -> None:
+        await self.ensure_started()
+        opt = self.agent.option(config_id)
+        if opt is None:
+            self.mash.notify(f"agent has no {config_id} option", severity="warning")
+            return
+        choices = [(c.value, c.name, c.description or "") for c in opt.options]
+        value = await self.mash.pick(ChoiceScreen(opt.name, choices, str(opt.current_value)))
+        if value is None:
+            return
+        try:
+            await self.agent.set_option(config_id, value)
+        except Exception as e:
+            await self.chat.note(f"could not set {config_id}: {e}", "red")
+            return
+        await self.chat.note(f"{opt.name} → {self.agent.option_label(config_id)}")
+        self.status(self.state_text)
 
     async def ensure_started(self) -> None:
         if self.started:
@@ -242,21 +295,26 @@ class AgentPane(Vertical):
         elif isinstance(update, AgentPlanUpdate):
             steps = "\n".join(f"  [{e.status}] {e.content}" for e in update.entries)
             await self.chat.note(f"plan:\n{steps}")
+        elif isinstance(update, ConfigOptionUpdate):
+            self.status(self.state_text)
 
     @on(PromptArea.Submitted)
-    async def submit(self, event: PromptArea.Submitted) -> None:
+    def submit(self, event: PromptArea.Submitted) -> None:
         text = event.text.strip()
         self.query_one("#agent-input", PromptArea).clear()
         if not text:
             return
+        if text in ("/model", "/effort", "/mode"):
+            self.run_worker(self.choose_option(text[1:]), group="agent-option")
+            return
+        self.run_worker(self._turn(text), exclusive=True, group="agent")
+
+    async def _turn(self, text: str) -> None:
         await self.ensure_started()
         if not self.started:
             return
         await self.chat.user(text)
         self.status("working")
-        self.run_worker(self._turn(text), exclusive=True, group="agent")
-
-    async def _turn(self, text: str) -> None:
         try:
             reason = await self.agent.prompt(text)
             self.status(f"idle ({reason})")
@@ -512,11 +570,36 @@ class MashApp(App[None]):
 
     def get_system_commands(self, screen: Any) -> Iterable[SystemCommand]:
         yield SystemCommand("Keys", "List every key binding", self.action_keys)
+        yield SystemCommand(
+            "Model", "Choose the agent's model", lambda: self.run_worker(self.agent_option("model"))
+        )
+        yield SystemCommand(
+            "Effort", "Choose the agent's effort level", lambda: self.run_worker(self.agent_option("effort"))
+        )
+        yield SystemCommand(
+            "Permission mode",
+            "Choose how tool calls are approved",
+            lambda: self.run_worker(self.agent_option("mode")),
+        )
         yield SystemCommand("Theme", "Change the current theme", self.action_change_theme)
         yield SystemCommand("Quit", "Snapshot sessions and quit", self.action_quit)
 
     def action_keys(self) -> None:
         self.push_screen(KeysScreen())
+
+    async def agent_option(self, config_id: str) -> None:
+        wview = self.current_workspace_view()
+        if wview is None:
+            return
+        pane = wview.agent_pane
+        if not pane.has_class("visible"):
+            await self.action_toggle_agent()
+        await pane.choose_option(config_id)
+
+    async def pick(self, screen: ModalScreen[str | None]) -> str | None:
+        fut: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        self.push_screen(screen, callback=fut.set_result)
+        return await fut
 
     def action_prefix(self) -> None:
         self._prefix_focus = self.focused
