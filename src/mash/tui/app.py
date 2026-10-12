@@ -44,7 +44,7 @@ from textual.widgets.option_list import Option
 from mash.agent import Agent
 from mash.session import MatlabSession, SessionEvent
 from mash.tools import ToolServer
-from mash.tui.widgets import ChatLog, CodeInput, PromptArea, SessionView
+from mash.tui.widgets import ChatLog, CodeInput, PromptArea, SessionView, page_scroll
 from mash.workspace import Manager, Workspace
 
 
@@ -81,6 +81,7 @@ KEYS = [
     ("enter", "run the input line", "shell"),
     ("tab", "complete against the live workspace", "shell"),
     ("up / down", "input history", "shell"),
+    ("pageup / pagedown", "scroll the pane above the focused input", "shell"),
     ("ctrl+n", "new MATLAB session", "global"),
     ("ctrl+t", "new workspace", "global"),
     ("ctrl+a", "toggle agent pane", "global"),
@@ -297,6 +298,13 @@ class AgentPane(Vertical):
             await self.chat.note(f"plan:\n{steps}")
         elif isinstance(update, ConfigOptionUpdate):
             self.status(self.state_text)
+
+    def on_key(self, event: events.Key) -> None:
+        if self.app.focused is self.query_one("#agent-input", PromptArea) and page_scroll(
+            self.chat, event.key
+        ):
+            event.stop()
+            event.prevent_default()
 
     @on(PromptArea.Submitted)
     def submit(self, event: PromptArea.Submitted) -> None:

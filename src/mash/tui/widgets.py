@@ -205,11 +205,30 @@ class ReplPane(Vertical):
             self._partial = ""
 
 
+def page_scroll(pane: Widget, key: str) -> bool:
+    if key == "pageup":
+        pane.scroll_page_up()
+    elif key == "pagedown":
+        pane.scroll_page_down()
+    else:
+        return False
+    return True
+
+
 class SessionView(Vertical):
     def __init__(self, session: MatlabSession, run: Callable[[str], Any]) -> None:
         super().__init__(id=f"session-{session.name}")
         self.session = session
         self.run_code = run
+
+    def on_key(self, event: events.Key) -> None:
+        focused = self.app.focused
+        if focused is None or focused.id not in ("code-input", "repl-input"):
+            return
+        pane = self.repl.query_one("#repl-log", RichLog) if focused.id == "repl-input" else self.transcript
+        if page_scroll(pane, event.key):
+            event.stop()
+            event.prevent_default()
 
     def compose(self):
         yield Transcript()
