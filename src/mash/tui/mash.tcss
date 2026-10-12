@@ -1,0 +1,154 @@
+#body {
+    height: 1fr;
+}
+
+#workspaces {
+    width: 20;
+    border-right: solid $primary;
+}
+
+#ws-switcher {
+    width: 1fr;
+}
+
+WorkspaceView {
+    height: 1fr;
+}
+
+WorkspaceView > Horizontal {
+    height: 1fr;
+}
+
+#session-area {
+    width: 1fr;
+}
+
+#session-switcher {
+    height: 1fr;
+}
+
+AgentPane {
+    width: 56;
+    border-left: solid $secondary;
+    display: none;
+}
+
+AgentPane.visible {
+    display: block;
+}
+
+#agent-input {
+    height: auto;
+    max-height: 10;
+}
+
+#agent-status {
+    height: 1;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+SessionView {
+    height: 1fr;
+}
+
+Transcript {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.cell {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.cell-header {
+    height: 1;
+}
+
+.code {
+    background: $surface;
+    padding: 0 1;
+}
+
+.outputs {
+    height: auto;
+    padding: 0 1;
+}
+
+.figure {
+    height: 22;
+    width: auto;
+}
+
+.stderr {
+    color: $error;
+}
+
+#hint {
+    height: 1;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+ReplPane {
+    height: 14;
+    border-top: solid $secondary;
+    display: none;
+}
+
+ReplPane.visible {
+    display: block;
+}
+
+ChatLog {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.msg-user {
+    color: $accent;
+    margin-bottom: 1;
+}
+
+.msg-agent {
+    margin-bottom: 1;
+}
+
+.msg-note {
+    color: $text-muted;
+}
+
+PrefixScreen {
+    background: transparent;
+}
+
+KeysScreen #dialog {
+    width: 80;
+    height: 80%;
+}
+
+#keys-table {
+    height: 1fr;
+}
+
+PermissionScreen, PathScreen, KeysScreen {
+    align: center middle;
+}
+
+#dialog {
+    width: 72;
+    height: auto;
+    border: thick $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#dialog Horizontal {
+    height: auto;
+    margin-top: 1;
+}
+
+#dialog Button {
+    margin-right: 1;
+}
