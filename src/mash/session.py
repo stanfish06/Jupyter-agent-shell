@@ -16,6 +16,7 @@ import psutil
 from jupyter_client import AsyncKernelManager
 
 from mash.config import KERNEL_NAME, MATLAB_START_TIMEOUT, kernel_env
+from mash.htmltable import parse_html_table, table_text
 from mash.notebook import NotebookRecorder
 
 Author = Literal["human", "agent"]
@@ -37,7 +38,9 @@ class Output:
         if self.kind == "error":
             return f"{self.data['ename']}: {self.data['evalue']}"
         if "text/plain" in self.data:
-            return self.data["text/plain"]
+            plain = self.data["text/plain"]
+            table = parse_html_table(plain) if plain.lstrip().startswith("<html") else None
+            return table_text(table) if table else plain
         for mime, meta in self.metadata.items():
             if mime.startswith("image/"):
                 return f"[figure {mime} {meta.get('width', '?')}x{meta.get('height', '?')}]"

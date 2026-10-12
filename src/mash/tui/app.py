@@ -616,7 +616,7 @@ class MashApp(App[None]):
         pane = wview.agent_pane
         center: list[Widget] = [view.transcript, view.query_one("#code-input", CodeInput)]
         if view.repl.has_class("visible"):
-            center.append(view.repl.query_one("#repl-input", Input))
+            center.append(view.repl.query_one("#repl-input", CodeInput))
         agent: list[Widget] = []
         if pane.has_class("visible"):
             agent = [pane.chat, pane.query_one("#agent-input", PromptArea)]

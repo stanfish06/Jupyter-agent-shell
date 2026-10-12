@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 from textual import events, on
 from textual.containers import Vertical, VerticalScroll
@@ -15,6 +16,7 @@ from textual.widgets import Input, RichLog, Static, TextArea
 from textual_image.widget import Image
 
 from mash.engine import EngineRepl
+from mash.htmltable import MAX_ROWS, parse_html_table
 from mash.session import Cell, MatlabSession, Output
 
 
@@ -30,8 +32,26 @@ def output_widget(out: Output) -> Widget:
         if mime.startswith("image/") and isinstance(data, str):
             return Image(io.BytesIO(base64.b64decode(data)), classes="figure")
     if "text/plain" in out.data:
-        return Static(Text(out.data["text/plain"].rstrip("\n")))
+        plain = out.data["text/plain"]
+        table = parse_html_table(plain) if plain.lstrip().startswith("<html") else None
+        if table:
+            return Static(rich_table(table))
+        return Static(Text(plain.rstrip("\n")))
     return Static("")
+
+
+def rich_table(table: Any) -> Table:
+    t = Table(
+        title=table.caption or None, title_justify="left", show_lines=False, pad_edge=False, expand=False
+    )
+    for h in table.header or [""] * (len(table.rows[0]) if table.rows else 0):
+        t.add_column(h, justify="right")
+    for r in table.rows[:MAX_ROWS]:
+        t.add_row(*r)
+    if len(table.rows) > MAX_ROWS:
+        t.caption = f"… {len(table.rows) - MAX_ROWS} more rows"
+        t.caption_justify = "left"
+    return t
 
 
 class CellWidget(Vertical):
@@ -85,8 +105,9 @@ class Transcript(VerticalScroll):
 
 class CodeInput(Input):
     class Complete(Message):
-        def __init__(self, code: str, cursor: int) -> None:
+        def __init__(self, source: CodeInput, code: str, cursor: int) -> None:
             super().__init__()
+            self.source = source
             self.code = code
             self.cursor = cursor
 
@@ -96,8 +117,8 @@ class CodeInput(Input):
         ("tab", "complete", "Complete"),
     ]
 
-    def __init__(self, **kw: Any) -> None:
-        super().__init__(placeholder=">> MATLAB", **kw)
+    def __init__(self, placeholder: str = ">> MATLAB", **kw: Any) -> None:
+        super().__init__(placeholder=placeholder, **kw)
         self.history: list[str] = []
         self.pos = 0
 
@@ -122,7 +143,7 @@ class CodeInput(Input):
         self.cursor_position = len(self.value)
 
     def action_complete(self) -> None:
-        self.post_message(self.Complete(self.value, self.cursor_position))
+        self.post_message(self.Complete(self, self.value, self.cursor_position))
 
     def apply_completion(self, matches: list[str], start: int, end: int) -> str:
         if not matches:
@@ -149,7 +170,7 @@ class ReplPane(Vertical):
 
     def compose(self):
         yield RichLog(wrap=True, markup=False, id="repl-log")
-        yield Input(placeholder="raw >> (MATLAB engine, streaming stdout)", id="repl-input")
+        yield CodeInput(placeholder="raw >> (MATLAB engine, streaming stdout)", id="repl-input")
 
     async def ensure_connected(self) -> None:
         if self.engine.eng is not None or self.connecting:
@@ -172,6 +193,7 @@ class ReplPane(Vertical):
     async def run(self, event: Input.Submitted) -> None:
         code = event.value.strip()
         event.input.value = ""
+        self.query_one("#repl-input", CodeInput).remember(code)
         if not code:
             return
         log = self.query_one("#repl-log", RichLog)
@@ -219,7 +241,7 @@ class SessionView(Vertical):
     @on(CodeInput.Complete)
     async def complete(self, event: CodeInput.Complete) -> None:
         matches, start, end = await self.session.complete(event.code, event.cursor)
-        self.hint(self.query_one("#code-input", CodeInput).apply_completion(matches, start, end))
+        self.hint(event.source.apply_completion(matches, start, end))
 
     async def toggle_repl(self) -> None:
         pane = self.repl
