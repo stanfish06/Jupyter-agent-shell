@@ -11,7 +11,6 @@ dependencies = [
     "agent-client-protocol>=0.12.1",
     "jupyter-client>=8.10.0",
     "jupyter-matlab-proxy>=0.20.0",
-    "matlabengine",
     "mcp>=2.3.0",
     "nbformat>=5.11.1",
     "psutil>=7.2.2",
@@ -21,13 +20,11 @@ dependencies = [
 
 [project.scripts]
 mash = "mash:main"
+mash-setup = "mash.setup:main"
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
-
-[tool.uv.sources]
-matlabengine = { path = "/Applications/MATLAB_R2026a.app/extern/engines/python" }
 
 [dependency-groups]
 dev = [

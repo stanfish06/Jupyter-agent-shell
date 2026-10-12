@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import io
 from collections.abc import Callable
 from typing import Any
@@ -14,10 +15,13 @@ class EngineRepl:
         self.error: str | None = None
 
     async def connect(self) -> bool:
-        import matlab.engine
-
         try:
-            self.eng = await asyncio.to_thread(matlab.engine.connect_matlab, self.share_name)
+            engine = importlib.import_module("matlab.engine")
+        except ImportError:
+            self.error = "MATLAB Engine for Python not installed; run: uv run mash-setup"
+            return False
+        try:
+            self.eng = await asyncio.to_thread(engine.connect_matlab, self.share_name)
         except Exception as e:
             self.error = str(e)
             return False

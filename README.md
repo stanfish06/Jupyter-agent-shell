@@ -21,3 +21,11 @@ Capabilities:
 - sessions and workspaces
 - render images (if terminal supports)
 - save session scripts as .ipynb and .m
+
+Install:
+```
+bun install
+uv run mash-setup
+uv run mash
+# Don't run uv sync as it will remove the matlabengine for python (need to rerun uv run mash-setup if sync)
+```

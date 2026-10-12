@@ -1430,7 +1430,6 @@ dependencies = [
     { name = "agent-client-protocol" },
     { name = "jupyter-client" },
     { name = "jupyter-matlab-proxy" },
-    { name = "matlabengine" },
     { name = "mcp" },
     { name = "nbformat" },
     { name = "psutil" },
@@ -1451,7 +1450,6 @@ requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.12.1" },
     { name = "jupyter-client", specifier = ">=8.10.0" },
     { name = "jupyter-matlab-proxy", specifier = ">=0.20.0" },
-    { name = "matlabengine", directory = "/Applications/MATLAB_R2026a.app/extern/engines/python" },
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "nbformat", specifier = ">=5.11.1" },
     { name = "psutil", specifier = ">=7.2.2" },
@@ -1483,11 +1481,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/2b/80/0f23714d2d83eca2d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/03/46/447023a8e8d8b3efb05a35c2467650afdc64263f2b21229478b030f1e8e2/matlab_proxy-0.35.0-py3-none-any.whl", hash = "sha256:351414612ca30b6858f93c425407182de94893a432636626b8a6055136c3429f", size = 885561, upload-time = "2026-09-25T12:12:35.43Z" },
 ]
-
-[[package]]
-name = "matlabengine"
-version = "26.1"
-source = { directory = "/Applications/MATLAB_R2026a.app/extern/engines/python" }
 
 [[package]]
 name = "matplotlib-inline"
