@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mash.session import Author, MatlabSession, SessionEvent
+from mash.session import Author, Session, SessionEvent
 
 if TYPE_CHECKING:
     from mash.agent import Agent
@@ -17,11 +17,10 @@ class Workspace:
         self.name = name
         self.path = path
         self.record_dir = path / "mash-notebooks" / datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        self.sessions: dict[str, MatlabSession] = {}
+        self.sessions: dict[str, Session] = {}
         self.agent: Agent | None = None
         self.listeners: list[Callable[[SessionEvent], None]] = []
         self._counter = 0
-        self._tasks: list[asyncio.Task[None]] = []
 
     def subscribe(self, fn: Callable[[SessionEvent], None]) -> None:
         self.listeners.append(fn)
@@ -30,18 +29,21 @@ class Workspace:
         for fn in list(self.listeners):
             fn(ev)
 
-    def new_session(self, name: str | None = None, created_by: Author = "human") -> MatlabSession:
+    def new_session(
+        self, name: str | None = None, created_by: Author = "human", languages: Iterable[str] = ()
+    ) -> Session:
         self._counter += 1
         name = name or f"s{self._counter}"
         if name in self.sessions:
             raise ValueError(f"session {name} already exists")
-        session = MatlabSession(name, self.path, self.record_dir, created_by)
+        session = Session(name, self.path, self.record_dir, created_by)
         session.subscribe(self._forward)
         self.sessions[name] = session
-        self._tasks.append(asyncio.create_task(session.start()))
+        for lang in languages:
+            session.add_kernel(lang)
         return session
 
-    def get(self, name: str) -> MatlabSession:
+    def get(self, name: str) -> Session:
         if name not in self.sessions:
             raise KeyError(f"no session named {name}; have {list(self.sessions)}")
         return self.sessions[name]
@@ -53,8 +55,7 @@ class Workspace:
     async def close(self) -> None:
         if self.agent:
             await self.agent.stop()
-        for name in list(self.sessions):
-            await self.close_session(name)
+        await asyncio.gather(*(self.close_session(name) for name in list(self.sessions)))
 
 
 class Manager:

@@ -91,6 +91,22 @@ Transcript {
     padding: 0 1;
 }
 
+#prompt-row {
+    height: auto;
+}
+
+#prompt-label {
+    width: auto;
+    height: 3;
+    content-align: left middle;
+    padding: 0 0 0 1;
+    color: $accent;
+}
+
+#code-input {
+    width: 1fr;
+}
+
 ReplPane {
     height: 14;
     border-top: solid $secondary;

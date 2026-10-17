@@ -10,14 +10,19 @@ from pathlib import Path
 
 ADAPTER = Path(__file__).resolve().parents[2] / "node_modules" / ".bin" / "claude-agent-acp"
 PREFERRED_MCP_PORT = int(os.environ.get("MASH_MCP_PORT", "8765"))
-KERNEL_NAME = "jupyter_matlab_kernel"
-MATLAB_START_TIMEOUT = 300
 
 INSTALL_GLOBS = {
     "darwin": ["/Applications/MATLAB_R20*.app"],
     "linux": ["/usr/local/MATLAB/R20*", "/opt/MATLAB/R20*", "~/MATLAB/R20*"],
     "win32": [r"C:\Program Files\MATLAB\R20*"],
 }
+
+
+def data_dir() -> Path:
+    home = os.environ.get("MASH_HOME")
+    if home:
+        return Path(home).expanduser()
+    return Path(os.environ.get("XDG_DATA_HOME") or "~/.local/share").expanduser() / "mash"
 
 
 @cache
@@ -45,14 +50,3 @@ def free_port(preferred: int) -> int:
                 continue
             return s.getsockname()[1]
     raise RuntimeError("no free TCP port")
-
-
-def kernel_env(share_name: str, cwd: Path) -> dict[str, str]:
-    root = matlab_root()
-    env = dict(os.environ)
-    env["PATH"] = f"{root / 'bin'}{os.pathsep}{env['PATH']}"
-    env["MWI_CUSTOM_MATLAB_ROOT"] = str(root)
-    env["MWI_USE_EXISTING_LICENSE"] = "True"
-    env.setdefault("MWI_LOG_LEVEL", "WARN")
-    env["MWI_MATLAB_STARTUP_SCRIPT"] = f"cd('{cwd}'); matlab.engine.shareEngine('{share_name}');"
-    return env

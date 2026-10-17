@@ -47,18 +47,19 @@ async def main() -> int:
     await tools.start()
     ws = manager.new_workspace(root)
     ws.subscribe(on_event)
-    main_sess = ws.new_session("main")
+    main_sess = ws.new_session("main", languages=["matlab"])
+    kernel = main_sess.kernel()
     try:
-        await asyncio.wait_for(main_sess.ready.wait(), 240)
+        await asyncio.wait_for(kernel.ready.wait(), 240)
     except TimeoutError:
         print("start timeout; kernel log tail:")
-        print("\n".join(main_sess.logs[-40:]))
+        print("\n".join(kernel.logs[-40:]))
         return 1
-    if main_sess.state == "dead":
-        print("session failed:", main_sess.error)
-        print("\n".join(main_sess.logs[-30:]))
+    if kernel.state == "dead":
+        print("kernel failed:", kernel.error)
+        print("\n".join(kernel.logs[-30:]))
         return 1
-    print("desktop:", main_sess.desktop_url)
+    print("desktop:", kernel.desktop_url)
 
     cell = await main_sess.execute("a = 40; b = a + 2", "human")
     print("human cell text:", cell.text().strip())
@@ -67,15 +68,15 @@ async def main() -> int:
             main_sess.execute("figure; plot(sin(0:0.1:6)); title('smoke')", "human"), 90
         )
     except TimeoutError:
-        print("figure cell timed out; pending:", main_sess._pending, "kernel log tail:")
-        print("\n".join(main_sess.logs[-40:]))
+        print("figure cell timed out; pending:", kernel._pending, "kernel log tail:")
+        print("\n".join(kernel.logs[-40:]))
         await manager.close()
         return 1
     print("figure outputs:", [(o.kind, list(o.data)) for o in cell.outputs])
-    nb = main_sess.record_dir / "main.ipynb"
+    nb = main_sess.record_dir / "matlab.ipynb"
     print("notebook:", nb, nb.stat().st_size, "bytes")
 
-    repl = EngineRepl(main_sess.share_name)
+    repl = EngineRepl(kernel.share_name)
     ok = await repl.connect()
     print("engine connected:", ok, repl.error)
     if ok:

@@ -108,14 +108,15 @@ class Agent(Client):
     def context_prefix(self) -> str:
         lines = ["Workspace sessions:"]
         for sess in self.workspace.sessions.values():
-            lines.append(f"- {sess.name}: {sess.state}, created by {sess.created_by}")
+            kernels = ", ".join(f"{k.id} ({k.backend.title}, {k.state})" for k in sess.kernels.values())
+            lines.append(f"- {sess.name}: kernels {kernels or 'none'}; created by {sess.created_by}")
         fresh = []
         for sess in self.workspace.sessions.values():
             start = self.last_seen_cell_idx.get(sess.name, 0)
             for cell in sess.cells[start:]:
                 if cell.author == "human":
                     out = cell.text().strip()
-                    fresh.append(f"[{sess.name}] In[{cell.index}]: {cell.code}")
+                    fresh.append(f"[{sess.name}/{cell.kernel}] In[{cell.index}]: {cell.code}")
                     if out:
                         fresh.append("    " + out.replace("\n", "\n    ")[:2000])
             self.last_seen_cell_idx[sess.name] = len(sess.cells)

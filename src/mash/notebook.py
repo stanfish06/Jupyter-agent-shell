@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nbformat
 from nbformat.v4 import new_code_cell, new_notebook, new_output
 
 if TYPE_CHECKING:
+    from mash.backends import Backend
     from mash.session import Cell
-
-KERNELSPEC = {
-    "kernelspec": {"name": "jupyter_matlab_kernel", "display_name": "MATLAB Kernel", "language": "matlab"},
-    "language_info": {"name": "matlab", "file_extension": ".m", "mimetype": "text/x-matlab"},
-}
 
 
 class NotebookRecorder:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, backend: Backend, language_info: dict[str, Any]) -> None:
         self.path = path
-        self.nb = nbformat.read(path, as_version=4) if path.exists() else new_notebook(metadata=KERNELSPEC)
+        self.backend = backend
+        if path.exists():
+            self.nb = nbformat.read(path, as_version=4)
+        else:
+            info = dict(language_info) or {"name": backend.name, "file_extension": backend.file_ext}
+            meta = {"kernelspec": backend.notebook_kernelspec(language_info), "language_info": info}
+            self.nb = new_notebook(metadata=meta)
 
     def append(self, cell: Cell) -> None:
         outputs = []
@@ -31,15 +33,17 @@ class NotebookRecorder:
                 outputs.append(new_output("error", **o.data))
         meta = {
             "mash": {
+                "index": cell.index,
+                "kernel": cell.kernel,
                 "author": cell.author,
                 "status": cell.status,
                 "started": cell.started.isoformat(timespec="seconds"),
                 "finished": cell.finished.isoformat(timespec="seconds") if cell.finished else None,
             }
         }
-        self.nb.cells.append(
-            new_code_cell(cell.code, outputs=outputs, execution_count=cell.index, metadata=meta)
-        )
+        count = sum(1 for c in self.nb.cells if c.cell_type == "code") + 1
+        self.nb.cells.append(new_code_cell(cell.code, outputs=outputs, execution_count=count, metadata=meta))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         nbformat.write(self.nb, self.path)
         self.write_script()
 
@@ -51,6 +55,6 @@ class NotebookRecorder:
             m = c.metadata.get("mash", {})
             who = "you" if m.get("author") == "human" else m.get("author", "?")
             when = m.get("started", "")
-            header = f"%% In[{c.execution_count}] {who} {when}"
+            header = f"{self.backend.marker} In[{c.execution_count}] {who} {when}"
             sections.append(f"{header}\n{c.source.rstrip()}\n")
-        self.path.with_suffix(".m").write_text("\n".join(sections))
+        self.path.with_suffix(self.backend.file_ext).write_text("\n".join(sections))

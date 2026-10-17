@@ -42,5 +42,9 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["RUF012", "B008"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
 [tool.ty.environment]
 python-version = "3.12"

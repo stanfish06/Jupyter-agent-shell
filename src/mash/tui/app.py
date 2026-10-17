@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import re
 import webbrowser
 from collections.abc import Iterable
 from pathlib import Path
@@ -42,14 +41,20 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from mash.agent import Agent
-from mash.session import MatlabSession, SessionEvent
+from mash.backends import default_language, get_backend, language_status
+from mash.session import KernelHandle, Session, SessionEvent
 from mash.tools import ToolServer
-from mash.tui.widgets import ChatLog, CodeInput, PromptArea, SessionView, page_scroll
+from mash.tui.widgets import (
+    STATE_MARK,
+    ChatLog,
+    CodeInput,
+    PromptArea,
+    SessionView,
+    matlab_kernel,
+    page_scroll,
+    wid,
+)
 from mash.workspace import Manager, Workspace
-
-
-def wid(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
 
 class PermissionScreen(ModalScreen[str | None]):
@@ -82,12 +87,13 @@ KEYS = [
     ("tab", "complete against the live workspace", "shell"),
     ("up / down", "input history", "shell"),
     ("pageup / pagedown", "scroll the pane above the focused input", "shell"),
-    ("ctrl+n", "new MATLAB session", "global"),
+    ("ctrl+k", "switch kernel, add a language, or restart a dead kernel", "global"),
+    ("ctrl+n", "new session with the default kernel", "global"),
     ("ctrl+t", "new workspace", "global"),
     ("ctrl+a", "toggle agent pane", "global"),
-    ("ctrl+r", "toggle raw REPL", "global"),
+    ("ctrl+r", "toggle raw MATLAB engine REPL", "global"),
     ("ctrl+o", "open MATLAB desktop in browser", "global"),
-    ("ctrl+c", "interrupt the running cell", "global"),
+    ("ctrl+c", "interrupt the active kernel (or the only busy one)", "global"),
     ("ctrl+x", "cancel the agent's turn", "global"),
     ("ctrl+w", "focus workspace list", "global"),
     ("escape", "leave workspace list, back to previous focus", "workspaces"),
@@ -95,7 +101,7 @@ KEYS = [
     ("ctrl+b", "arm prefix", "global"),
     ("ctrl+p", "command palette", "global"),
     ("f1", "this key list", "global"),
-    ("ctrl+q", "snapshot sessions and quit", "global"),
+    ("ctrl+q", "snapshot MATLAB workspaces and quit", "global"),
     ("h j k l / arrows", "move focus between panes", "prefix"),
     ("n / p", "next / previous session tab", "prefix"),
     ("1-9", "nth session tab", "prefix"),
@@ -336,6 +342,7 @@ class WorkspaceView(Vertical):
         super().__init__(id=f"ws-{wid(workspace.name)}")
         self.workspace = workspace
         self.mash = app
+        self._mount_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -360,26 +367,31 @@ class WorkspaceView(Vertical):
         cur = self.switcher.current
         return self.switcher.query_one(f"#{cur}", SessionView) if cur else None
 
-    async def add_session(self, session: MatlabSession) -> SessionView:
-        view = SessionView(session, lambda code: self.mash.run_code(session, code))
-        await self.switcher.mount(view)
-        self.tabs.add_tab(Tab(self.tab_label(session), id=f"tab-{wid(session.name)}"))
-        self.tabs.active = f"tab-{wid(session.name)}"
-        return view
+    async def add_session(self, session: Session) -> SessionView:
+        # session events and start_session can both try to add the view; mount it once
+        async with self._mount_lock:
+            existing = self.view_for(session)
+            if existing is not None:
+                return existing
+            view = SessionView(session, lambda kid, code: self.mash.run_code(session, kid, code))
+            await self.switcher.mount(view)
+            self.tabs.add_tab(Tab(self.tab_label(session), id=f"tab-{wid(session.name)}"))
+            self.tabs.active = f"tab-{wid(session.name)}"
+            return view
 
-    def view_for(self, session: MatlabSession) -> SessionView | None:
+    def view_for(self, session: Session) -> SessionView | None:
         try:
             return self.switcher.query_one(f"#session-{wid(session.name)}", SessionView)
         except Exception:
             return None
 
     @staticmethod
-    def tab_label(session: MatlabSession) -> str:
-        mark = {"starting": "…", "idle": "", "busy": "▶", "dead": "✗"}[session.state]
+    def tab_label(session: Session) -> str:
+        mark = STATE_MARK[session.state] if session.kernels else "∅"
         who = "you" if session.owner == "human" else session.owner or ""
         return f"{session.name} {mark}{who}".strip()
 
-    def refresh_tab(self, session: MatlabSession) -> None:
+    def refresh_tab(self, session: Session) -> None:
         with contextlib.suppress(Exception):
             self.tabs.query_one(f"#tab-{wid(session.name)}", Tab).label = self.tab_label(session)
 
@@ -397,6 +409,7 @@ class MashApp(App[None]):
     TITLE = "mash"
     CSS_PATH = "mash.tcss"
     BINDINGS = [
+        Binding("ctrl+k", "kernels", "Kernels", priority=True),
         Binding("ctrl+n", "new_session", "New session", priority=True),
         Binding("ctrl+t", "new_workspace", "New workspace", priority=True),
         Binding("ctrl+a", "toggle_agent", "Agent", priority=True),
@@ -426,6 +439,7 @@ class MashApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        self.tools.installer = self.install_language
         await self.tools.start()
         await self.add_workspace(self.root)
 
@@ -468,9 +482,11 @@ class MashApp(App[None]):
             except Exception:
                 continue
 
-    async def start_session(self, ws: Workspace, name: str | None = None) -> MatlabSession:
+    async def start_session(self, ws: Workspace, name: str | None = None) -> Session:
         session = ws.new_session(name)
-        await self.workspace_view(ws).add_session(session)
+        view = await self.workspace_view(ws).add_session(session)
+        # worker: add_kernel may wait on the install dialog, which on_mount can't await
+        self.run_worker(self.add_kernel(view, default_language()), group="kernels")
         return session
 
     def on_session_event(self, ev: SessionEvent) -> None:
@@ -487,14 +503,16 @@ class MashApp(App[None]):
                 view = await wview.add_session(ev.session)
             else:
                 return
+        k = ev.kernel
         if ev.kind == "state":
             wview.refresh_tab(ev.session)
-            if ev.session.state == "dead" and ev.session.error:
-                view.hint(f"session died: {ev.session.error[:200]}")
-            elif ev.session.state == "idle" and not ev.session.cells:
-                view.hint("MATLAB ready")
-        elif ev.kind == "cell_started" and ev.cell:
-            await view.transcript.add_cell(ev.cell)
+            view.refresh_prompt()
+            if k and k.state == "dead" and k.error and ev.session.kernels.get(k.id) is k:
+                view.hint(f"{k.id} died: {k.error[:200]} · ctrl+k to restart")
+        elif ev.kind == "ready" and k:
+            view.hint(f"{k.id} ready ({k.backend.title})")
+        elif ev.kind == "cell_started" and ev.cell and k:
+            await view.transcript.add_cell(ev.cell, k.backend.lexer)
         elif ev.kind == "output" and ev.cell and ev.output:
             w = view.transcript.get(ev.cell)
             if w:
@@ -504,17 +522,95 @@ class MashApp(App[None]):
             w = view.transcript.get(ev.cell)
             if w:
                 w.refresh_header()
-        elif ev.kind == "log" and ev.session.state == "starting":
-            view.hint(ev.text[-120:])
+        elif ev.kind == "log" and k and k.state == "starting":
+            view.hint(f"{k.id}: {ev.text[-120:]}")
 
-    async def run_code(self, session: MatlabSession, code: str) -> None:
-        if session.state == "starting":
-            self.notify("MATLAB is still starting", severity="warning")
-            return
-        if session.state == "dead":
-            self.notify("session is dead", severity="error")
-            return
-        self.run_worker(session.execute(code, "human"), group=f"exec-{session.name}")
+    async def run_code(self, session: Session, kid: str | None, code: str) -> None:
+        kernel = session.kernels.get(kid) if kid else None
+        if kernel is None:
+            self.notify("no kernel in this session; ctrl+k to add one", severity="warning")
+        elif kernel.state == "starting":
+            self.notify(f"{kernel.id} is still starting", severity="warning")
+        elif kernel.state == "dead":
+            self.notify(f"{kernel.id} is dead; ctrl+k to restart it", severity="error")
+        else:
+            self.run_worker(self._execute(kernel, code), group=f"exec-{session.name}-{kernel.id}")
+
+    async def _execute(self, kernel: KernelHandle, code: str) -> None:
+        try:
+            await kernel.execute(code, "human")
+        except Exception as e:
+            self.notify(f"{kernel.id}: {e}", severity="error")
+
+    def action_kernels(self) -> None:
+        view = self.current_session_view()
+        if view is not None:
+            self.run_worker(self.pick_kernel(view), group="kernels")
+
+    async def pick_kernel(self, view: SessionView) -> None:
+        session = view.session
+        choices: list[tuple[str, str, str]] = []
+        for k in session.kernels.values():
+            if k.state == "dead":
+                choices.append((f"restart:{k.id}", f"restart {k.id}", (k.error or "dead")[:60]))
+            else:
+                choices.append((f"use:{k.id}", k.id, f"{k.backend.title} · {k.state}"))
+        for b, ok, detail in await asyncio.to_thread(language_status, session.cwd):
+            choices.append((f"add:{b.name}", f"add {b.title}", detail if ok else f"{b.missing} · {detail}"))
+        value = await self.pick(ChoiceScreen(f"Kernels in {session.name}", choices, f"use:{view.active}"))
+        action, _, arg = (value or "").partition(":")
+        try:
+            if action == "use":
+                view.set_active(arg)
+            elif action == "restart":
+                view.set_active((await session.restart_kernel(arg)).id)
+            elif action == "add":
+                await self.add_kernel(view, arg)
+        except Exception as e:
+            self.notify(f"{action} {arg}: {e}", severity="error")
+        view.query_one("#code-input", CodeInput).focus()
+
+    async def add_kernel(self, view: SessionView, language: str) -> None:
+        backend = get_backend(language)
+        ok, _ = await asyncio.to_thread(backend.status, view.session.cwd)
+        if not ok:
+            err = await self.install_language(backend.name, "human")
+            if err:
+                self.notify(err, severity="warning")
+                view.hint(f"no {backend.title} kernel · ctrl+k to add one")
+                return
+        view.set_active(view.session.add_kernel(backend.name).id)
+
+    async def install_language(self, language: str, requested_by: str) -> str | None:
+        backend = get_backend(language)
+        if not backend.installable:
+            return f"mash can't install {backend.title}: {backend.install_summary()}"
+        action = backend.setup_action()
+        title = (
+            f"The agent wants to {action}?"
+            if requested_by == "agent"
+            else f"{action[:1].upper()}{action[1:]}?"
+        )
+        choices = [("yes", action.split()[0].capitalize(), backend.install_summary()), ("no", "Cancel", "")]
+        if await self.pick(ChoiceScreen(title, choices, "no")) != "yes":
+            return f"the human declined to {action}"
+        self.notify(f"setting up {backend.title} …", timeout=10)
+
+        def log(line: str) -> None:
+            self.call_from_thread(self.install_progress, backend.title, line)
+
+        try:
+            await asyncio.to_thread(backend.install, log)
+        except Exception as e:
+            self.notify(f"{backend.title} setup failed: {e}", severity="error", timeout=30)
+            return f"setup failed: {e}"
+        self.notify(f"{backend.title} is set up")
+        return None
+
+    def install_progress(self, title: str, line: str) -> None:
+        view = self.current_session_view()
+        if view is not None and line.strip():
+            view.hint(f"[{title} setup] {line.strip()[-160:]}")
 
     async def ask_permission(self, title: str, options: list[PermissionOption]) -> str | None:
         fut: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
@@ -559,17 +655,26 @@ class MashApp(App[None]):
 
     def action_open_desktop(self) -> None:
         view = self.current_session_view()
-        if view and view.session.desktop_url:
-            webbrowser.open(view.session.desktop_url)
+        kernel = matlab_kernel(view.session) if view else None
+        if kernel and kernel.desktop_url:
+            webbrowser.open(kernel.desktop_url)
             self.notify("opened MATLAB desktop in browser")
         else:
-            self.notify("desktop URL not known yet", severity="warning")
+            self.notify("no MATLAB desktop URL in this session yet", severity="warning")
 
     async def action_interrupt(self) -> None:
         view = self.current_session_view()
-        if view and view.session.state == "busy":
-            await view.session.interrupt()
-            self.notify(f"interrupted {view.session.name} (was running: {view.session.owner})")
+        if view is None:
+            return
+        busy = [k for k in view.session.kernels.values() if k.state == "busy"]
+        active = view.active_kernel()
+        target = active if active in busy else (busy[0] if len(busy) == 1 else None)
+        if target is not None:
+            await target.interrupt()
+            self.notify(f"interrupted {target.id} (was running: {target.owner})")
+        elif busy:
+            names = ", ".join(k.id for k in busy)
+            self.notify(f"active kernel is idle; busy: {names} · ctrl+k to switch", severity="warning")
 
     async def action_cancel_agent(self) -> None:
         wview = self.current_workspace_view()
@@ -684,14 +789,15 @@ class MashApp(App[None]):
             self.focus_current_input()
 
     async def action_quit(self) -> None:
-        self.notify("saving sessions and shutting down MATLAB …")
+        self.notify("saving sessions and shutting down kernels …")
         for view in self.query(SessionView):
-            view.repl.engine.close()
+            view.repl.close()
         for ws in self.manager.workspaces.values():
             for sess in ws.sessions.values():
-                if sess.state == "idle":
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(sess.snapshot(), 20)
+                for kernel in sess.kernels.values():
+                    if kernel.state == "idle":
+                        with contextlib.suppress(Exception):
+                            await asyncio.wait_for(kernel.snapshot(), 20)
         await self.manager.close()
         await self.tools.stop()
         self.exit()

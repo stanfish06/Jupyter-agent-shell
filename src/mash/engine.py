@@ -18,7 +18,7 @@ class EngineRepl:
         try:
             engine = importlib.import_module("matlab.engine")
         except ImportError:
-            self.error = "MATLAB Engine for Python not installed; run: uv run mash-setup"
+            self.error = "MATLAB Engine for Python not installed; run: uv run mash-setup matlab"
             return False
         try:
             self.eng = await asyncio.to_thread(engine.connect_matlab, self.share_name)

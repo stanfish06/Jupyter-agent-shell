@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +11,7 @@ from mash.tui.widgets import CodeInput, SessionView
 
 
 async def main() -> int:
+    os.environ.setdefault("MASH_DEFAULT_KERNEL", "matlab")
     root = Path(tempfile.mkdtemp(prefix="mash-tui-"))
     app = MashApp(root)
     async with app.run_test(size=(140, 45)) as pilot:
@@ -17,10 +19,13 @@ async def main() -> int:
         wview = app.current_workspace_view()
         assert wview is not None
         session = next(iter(wview.workspace.sessions.values()))
-        print("session:", session.name, session.state)
-        await asyncio.wait_for(session.ready.wait(), 300)
+        while not session.kernels:
+            await pilot.pause(0.1)
+        kernel = session.kernel()
+        print("session:", session.name, kernel.id, kernel.state)
+        await asyncio.wait_for(kernel.ready.wait(), 300)
         await pilot.pause()
-        print("ready:", session.state, "desktop:", session.desktop_url)
+        print("ready:", kernel.state, "desktop:", kernel.desktop_url)
         view = wview.current_view()
         assert isinstance(view, SessionView)
         inp = view.query_one("#code-input", CodeInput)
@@ -36,8 +41,8 @@ async def main() -> int:
                     break
         await pilot.pause(0.5)
         if any(c.finished is None for c in session.cells):
-            print("HUNG cell; pending:", session._pending, "state:", session.state)
-            print("kernel log tail:\n" + "\n".join(session.logs[-25:]))
+            print("HUNG cell; pending:", kernel._pending, "state:", kernel.state)
+            print("kernel log tail:\n" + "\n".join(kernel.logs[-25:]))
         print(
             "cells:",
             [

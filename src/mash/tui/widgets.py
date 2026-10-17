@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -9,7 +10,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual import events, on
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static, TextArea
@@ -17,7 +18,13 @@ from textual_image.widget import Image
 
 from mash.engine import EngineRepl
 from mash.htmltable import MAX_ROWS, parse_html_table
-from mash.session import Cell, MatlabSession, Output
+from mash.session import IMAGE_MIMES, Cell, KernelHandle, Output, Session
+
+STATE_MARK = {"starting": "…", "idle": "", "busy": "▶", "dead": "✗"}
+
+
+def wid(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
 
 def output_widget(out: Output) -> Widget:
@@ -27,9 +34,9 @@ def output_widget(out: Output) -> Widget:
             w.add_class("stderr")
         return w
     if out.kind == "error":
-        return Static(Text(f"{out.data['ename']}: {out.data['evalue']}"), classes="stderr")
+        return Static(Text(out.text()), classes="stderr")
     for mime, data in out.data.items():
-        if mime.startswith("image/") and isinstance(data, str):
+        if mime in IMAGE_MIMES and isinstance(data, str):
             return Image(io.BytesIO(base64.b64decode(data)), classes="figure")
     if "text/plain" in out.data:
         plain = out.data["text/plain"]
@@ -37,7 +44,7 @@ def output_widget(out: Output) -> Widget:
         if table:
             return Static(rich_table(table))
         return Static(Text(plain.rstrip("\n")))
-    return Static("")
+    return Static(Text(out.text().rstrip("\n")))
 
 
 def rich_table(table: Any) -> Table:
@@ -55,21 +62,25 @@ def rich_table(table: Any) -> Table:
 
 
 class CellWidget(Vertical):
-    def __init__(self, cell: Cell) -> None:
+    def __init__(self, cell: Cell, lexer: str) -> None:
         super().__init__(classes=f"cell author-{cell.author}")
         self.cell = cell
+        self.lexer = lexer
         self._outputs: dict[int, Widget] = {}
 
     def compose(self):
         yield Static(self.header(), classes="cell-header")
-        yield Static(Syntax(self.cell.code, "matlab", theme="ansi_dark", word_wrap=True), classes="code")
+        yield Static(Syntax(self.cell.code, self.lexer, theme="ansi_dark", word_wrap=True), classes="code")
         yield Vertical(classes="outputs")
 
     def header(self) -> Text:
         tag = "you" if self.cell.author == "human" else self.cell.author
         style = {"running": "yellow", "ok": "green", "error": "red"}[self.cell.status]
         return Text.assemble(
-            (f"In[{self.cell.index}] ", "bold"), (tag, style), (f" {self.cell.status}", style)
+            (f"[{self.cell.kernel}] ", "cyan"),
+            (f"In[{self.cell.index}] ", "bold"),
+            (tag, style),
+            (f" {self.cell.status}", style),
         )
 
     def refresh_header(self) -> None:
@@ -92,15 +103,15 @@ class Transcript(VerticalScroll):
         super().__init__()
         self.cells: dict[int, CellWidget] = {}
 
-    async def add_cell(self, cell: Cell) -> CellWidget:
-        w = CellWidget(cell)
-        self.cells[cell.index] = w
+    async def add_cell(self, cell: Cell, lexer: str) -> CellWidget:
+        w = CellWidget(cell, lexer)
+        self.cells[id(cell)] = w
         await self.mount(w)
         self.scroll_end(animate=False)
         return w
 
     def get(self, cell: Cell) -> CellWidget | None:
-        return self.cells.get(cell.index)
+        return self.cells.get(id(cell))
 
 
 class CodeInput(Input):
@@ -117,7 +128,7 @@ class CodeInput(Input):
         ("tab", "complete", "Complete"),
     ]
 
-    def __init__(self, placeholder: str = ">> MATLAB", **kw: Any) -> None:
+    def __init__(self, placeholder: str = "ctrl+k to switch kernel", **kw: Any) -> None:
         super().__init__(placeholder=placeholder, **kw)
         self.history: list[str] = []
         self.pos = 0
@@ -160,11 +171,17 @@ class CodeInput(Input):
         return "" if len(matches) == 1 else "  ".join(matches[:12]) + ("  …" if len(matches) > 12 else "")
 
 
+def matlab_kernel(session: Session) -> KernelHandle | None:
+    return next(
+        (k for k in session.kernels.values() if k.backend.name == "matlab" and k.state != "dead"), None
+    )
+
+
 class ReplPane(Vertical):
-    def __init__(self, session: MatlabSession) -> None:
+    def __init__(self, session: Session) -> None:
         super().__init__()
         self.session = session
-        self.engine = EngineRepl(session.share_name)
+        self.engine: EngineRepl | None = None
         self.connecting = False
         self._partial = ""
 
@@ -173,14 +190,23 @@ class ReplPane(Vertical):
         yield CodeInput(placeholder="raw >> (MATLAB engine, streaming stdout)", id="repl-input")
 
     async def ensure_connected(self) -> None:
-        if self.engine.eng is not None or self.connecting:
+        if (self.engine is not None and self.engine.eng is not None) or self.connecting:
+            return
+        log = self.query_one("#repl-log", RichLog)
+        kernel = matlab_kernel(self.session)
+        if kernel is None:
+            log.write("no running MATLAB kernel in this session (ctrl+k adds one)")
             return
         self.connecting = True
-        log = self.query_one("#repl-log", RichLog)
-        log.write(f"connecting to shared engine {self.session.share_name} …")
+        self.engine = EngineRepl(kernel.share_name)
+        log.write(f"connecting to shared engine {kernel.share_name} …")
         ok = await self.engine.connect()
         log.write("connected" if ok else f"engine connect failed: {self.engine.error}")
         self.connecting = False
+
+    def close(self) -> None:
+        if self.engine is not None:
+            self.engine.close()
 
     def _write(self, text: str) -> None:
         log = self.query_one("#repl-log", RichLog)
@@ -199,6 +225,8 @@ class ReplPane(Vertical):
         log = self.query_one("#repl-log", RichLog)
         log.write(Text(f">> {code}", style="bold"))
         await self.ensure_connected()
+        if self.engine is None:
+            return
         await self.engine.eval(code, self._write)
         if self._partial:
             log.write(self._partial)
@@ -216,10 +244,11 @@ def page_scroll(pane: Widget, key: str) -> bool:
 
 
 class SessionView(Vertical):
-    def __init__(self, session: MatlabSession, run: Callable[[str], Any]) -> None:
-        super().__init__(id=f"session-{session.name}")
+    def __init__(self, session: Session, run: Callable[[str | None, str], Any]) -> None:
+        super().__init__(id=f"session-{wid(session.name)}")
         self.session = session
         self.run_code = run
+        self.active: str | None = None
 
     def on_key(self, event: events.Key) -> None:
         focused = self.app.focused
@@ -233,8 +262,13 @@ class SessionView(Vertical):
     def compose(self):
         yield Transcript()
         yield Static("", id="hint")
-        yield CodeInput(id="code-input")
+        with Horizontal(id="prompt-row"):
+            yield Static("", id="prompt-label")
+            yield CodeInput(id="code-input")
         yield ReplPane(self.session)
+
+    def on_mount(self) -> None:
+        self.refresh_prompt()
 
     @property
     def transcript(self) -> Transcript:
@@ -247,6 +281,21 @@ class SessionView(Vertical):
     def hint(self, text: str) -> None:
         self.query_one("#hint", Static).update(text)
 
+    def active_kernel(self) -> KernelHandle | None:
+        kernels = self.session.kernels
+        if self.active not in kernels:
+            self.active = next(iter(kernels), None)
+        return kernels.get(self.active) if self.active else None
+
+    def set_active(self, kid: str) -> None:
+        self.active = kid
+        self.refresh_prompt()
+
+    def refresh_prompt(self) -> None:
+        k = self.active_kernel()
+        label = f"{k.id}{STATE_MARK[k.state]} >>" if k else "no kernel >>"
+        self.query_one("#prompt-label", Static).update(label)
+
     @on(Input.Submitted, "#code-input")
     async def submit(self, event: Input.Submitted) -> None:
         code = event.value.strip()
@@ -255,11 +304,15 @@ class SessionView(Vertical):
         inp.remember(code)
         self.hint("")
         if code:
-            await self.run_code(code)
+            k = self.active_kernel()
+            await self.run_code(k.id if k else None, code)
 
     @on(CodeInput.Complete)
     async def complete(self, event: CodeInput.Complete) -> None:
-        matches, start, end = await self.session.complete(event.code, event.cursor)
+        k = self.active_kernel()
+        if k is None:
+            return
+        matches, start, end = await k.complete(event.code, event.cursor)
         self.hint(event.source.apply_completion(matches, start, end))
 
     async def toggle_repl(self) -> None:
